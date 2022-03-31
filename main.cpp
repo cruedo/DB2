@@ -10,7 +10,7 @@ using namespace std;
 #define MV_VOID(x, y) (((uint8_t*)(x))+(y))
 
 
-const uint32_t PAGE_SIZE = 60;
+const uint32_t PAGE_SIZE = 70;
 const uint32_t MAX_PAGES = 100;
 const uint32_t MAX_TABLES = 100;
 
@@ -148,12 +148,12 @@ public:
     int32_t root;
     fstream fd;
     string filename;
+    int32_t page_count;
 
 
     int findEmptyPage() {
-        fd.seekg(0, ios_base::end);
-        int fileSize = fd.tellg();
-        int res = ceil((double)fileSize / PAGE_SIZE);
+        int res = page_count;
+        ++page_count;
         pages[res] = new PageNode();
         return res;
     }
@@ -173,17 +173,21 @@ public:
         
         if(pages[index] == nullptr) {
             pages[index] = new PageNode();
-            int totalPages = ceil((double)fileSize / PAGE_SIZE);
+            int totalPages = page_count;
+
             
             // If the page with the given number exists within the file then just read it from the file.
             if(index < totalPages) {
                 fd.seekg(index * PAGE_SIZE);
                 fd.read((char*)(pages[index]->page), PAGE_SIZE);
             }
-
-            if(index == 0) {
-                pages[index]->initializeLeafNode();
+            else {
+                ++page_count;
+                if(index == 0) {
+                    pages[index]->initializeLeafNode();
+                }
             }
+
         }
         return ;
     }
@@ -203,7 +207,14 @@ public:
         ind = pages[curIndex]->getInternalPointer(ind - 1);
         return findPage(ind, x);
     }
-
+    int findRoot(int curIndex) {
+        loadPage(curIndex);
+        while(pages[curIndex]->parent() != -1) {
+            curIndex = pages[curIndex]->parent();
+            loadPage(curIndex);
+        }
+        return curIndex;
+    }
 
     // Debug
     void printInternalNode(int index) {
@@ -228,6 +239,7 @@ public:
     void printAll() {
         int index = findPage(root, -2e8);
         while(index >= 0) {
+            loadPage(index);
             printLeafNode(index);
             index = pages[index]->getNext();
         }
@@ -267,6 +279,8 @@ public:
             pg->setNumRows(pg->size() + 1);
             root = pageNumber;
         }
+        pg = pages[pageNumber];
+
 
         pages[left]->setParent(pageNumber);
         pages[right]->setParent(pageNumber);
@@ -284,7 +298,6 @@ public:
         pg->setInternalKey(i, key);
         pg->setInternalPointer(i+1, right);
         pg->setNumRows(pg->size() + 2);
-        printf("debug: \n");
         printInternalNode(pageNumber);
 
         sz = pg->size();
@@ -359,6 +372,12 @@ Table* table_open(char* filename) {
     for(auto &p: table->pages) {
         p = nullptr;
     }
+    (table->fd).seekg(0, ios_base::end);
+    int fileSize = (table->fd).tellg();
+    table->page_count = ceil((double)fileSize / PAGE_SIZE);
+    cout << "The total pages are : " << table->page_count << "\n";
+    table->root = table->findRoot(0);
+    cout << "The root is initialized to : " << table->root << "\n";
 
     return table;
 }
@@ -372,8 +391,6 @@ int table_close(Table* table) {
             // print(p->page, 40);
         }
         table->fd.seekp(i * PAGE_SIZE);
-        table->fd.seekg(i * PAGE_SIZE);
-        printf("FILE SZ: %d i: %d\n", table->fd.tellg(), i);
         table->fd.write((char*)(p->page), PAGE_SIZE);
     }
     table->fd.close();
@@ -450,6 +467,18 @@ int main(int argc, char* argv[]) {
     printf("maxinternalrows: %d\n", MAX_INTERNAL_ROWS);
 
     string rawInputString;
+
+
+        // for(int i=1;i<=15;++i) {
+        //     string num = to_string(i);
+        //     rawInputString = "insert " + num + " " + num + " " + num;
+        //     vector<string> inputCommand = split(rawInputString, ' ');
+        //     Row row;
+        //     prepareStatement(inputCommand, row);
+        //     executeStatement(table, inputCommand, row);
+        //     cout << " ------ ### --------\n";
+        // }
+        // executeSelect(table);
     while(true) {
         cout << "db2 > ";
         getline(cin, rawInputString);
@@ -487,6 +516,9 @@ int main(int argc, char* argv[]) {
         }
 
     }
+
+
+
 
     return 0;
 }
