@@ -48,7 +48,7 @@ public:
 
 const uint32_t ROW_SIZE = sizeof(Row);
 const uint32_t MAX_LEAF_ROWS = BODY_SIZE / ROW_SIZE - 1;
-const uint32_t MAX_INTERNAL_ROWS = BODY_SIZE / INTERNAL_CELL_SIZE - 2;
+const uint32_t MAX_INTERNAL_ROWS = BODY_SIZE / INTERNAL_CELL_SIZE - 2 - ((BODY_SIZE / INTERNAL_CELL_SIZE) % 2 == 0);
 
 class PageNode {
 public:
@@ -343,7 +343,7 @@ public:
         if(sz > MAX_LEAF_ROWS) {
             int mid = (sz - 1) / 2;
             int64_t midKey = pg->getLeafKey(mid);
-            int rightHalfPageNumber = splitLeafNode(pageNumber, mid);
+            int rightHalfPageNumber = splitLeafNode(pageNumber, mid+1);
             pages[rightHalfPageNumber]->setNext(pg->getNext());
             pg->setNext(rightHalfPageNumber);
             insertIntoInternal(pg->parent(), midKey, pageNumber, rightHalfPageNumber);
