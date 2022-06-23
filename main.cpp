@@ -48,7 +48,11 @@ public:
 
 const uint32_t ROW_SIZE = sizeof(Row);
 const uint32_t MAX_LEAF_ROWS = BODY_SIZE / ROW_SIZE - 1;
+const uint32_t MIN_LEAF_ROWS = ceil((double)MAX_LEAF_ROWS / 2);
 const uint32_t MAX_INTERNAL_ROWS = BODY_SIZE / INTERNAL_CELL_SIZE - 2 - ((BODY_SIZE / INTERNAL_CELL_SIZE) % 2 == 0);
+const uint32_t MAX_INTERNAL_KEYS = MAX_INTERNAL_ROWS / 2;
+const uint32_t MIN_INTERNAL_KEYS = ceil((double)MAX_INTERNAL_KEYS / 2);
+const uint32_t MIN_INTERNAL_ROWS = 2 * (MIN_INTERNAL_KEYS) + 1;
 
 class PageNode {
 public:
@@ -130,6 +134,25 @@ public:
     }
     void copyInternalCell(int src, int dest) {
         setInternalKey(dest, getInternalKey(src));
+    }
+    void insertInternalCell(int index, int64_t value) {
+        int len = size();
+        for(int i=len-1;i>=index;--i) {
+            copyInternalCell(i, i+1);
+        }
+        setInternalKey(index, value);
+        setNumRows(len + 1);
+    }
+    void eraseInternalCell(int index) {
+        int len = size();
+        for(int i=index; i<len-1; ++i) {
+            copyInternalCell(i+1, i);
+        }
+        --len;
+        setNumRows(len);
+    }
+    int keySize() {
+        return size() / 2;
     }
 
     void initializeLeafNode() {
@@ -354,6 +377,206 @@ public:
         int pageNumber = findPage(root, row.id);
         insertIntoLeaf(pageNumber, row);
     }
+
+    // Delete
+
+    void mergeInternalNodes(int leftPageNumber, int rightPageNumber, int mid) {
+        PageNode* LPG = pages[leftPageNumber];
+        PageNode* RPG = pages[rightPageNumber];
+
+        int Llen = LPG->size(), Rlen = RPG->size();
+        LPG->setInternalKey(Llen, mid);
+        ++Llen;
+        for(int i=0;i<Rlen;++i) {
+            LPG->setInternalKey(Llen, RPG->getInternalKey(i));
+            ++Llen;
+            if(i % 2 == 0) {
+                pages[RPG->getInternalPointer(i)]->setParent(leftPageNumber);
+            }
+        }
+        LPG->setNumRows(Llen);
+
+        // WARNING !! Delete the right node here.
+    }
+
+    // REVIEW REQUIRED !!
+    void deleteInternal(int pageNumber, int key, int index) {
+        PageNode* pgnd = pages[pageNumber];
+        int len = pgnd->size();
+
+        for(int i=index; i<len-2; ++i) {
+            pgnd->copyInternalCell(i+2, i);
+        }
+        len -= 2;
+        pgnd->setNumRows(len);
+
+        if(len == 1 && pgnd->parent() == -1) {
+            int loneChildPageNumber = pgnd->getInternalPointer(0);
+            // De-allocate page with "pageNumber" here !
+            root = loneChildPageNumber;
+            pages[root]->setParent(-1);
+            return;
+        }
+
+        if(pages[pageNumber]->parent() == -1 || (len - 2) / 2 >= MIN_INTERNAL_KEYS) {
+            return;
+        }
+
+        int leftSiblingPageNumber = -1, rightSiblingPageNumber = -1, parentPageNumber = pgnd->parent();
+        int parentLen = pages[parentPageNumber]->size(), Llen = -1, Rlen = -1;
+
+        int ind;
+        for(ind=1;ind<parentLen;ind+=2) {
+            if(pages[parentPageNumber]->getInternalKey(ind) >= key)
+                break;
+        }
+        --ind;
+
+        if(ind-2 >= 0) {leftSiblingPageNumber = pages[parentPageNumber]->getInternalPointer(ind-2); Llen = pages[leftSiblingPageNumber]->size();}
+        if(ind+2 < parentLen) {rightSiblingPageNumber = pages[parentPageNumber]->getInternalPointer(ind+2);  pages[rightSiblingPageNumber]->size();}
+
+        if(leftSiblingPageNumber != -1 && pages[leftSiblingPageNumber]->keySize() > MIN_INTERNAL_KEYS) {
+            pages[pageNumber]->insertInternalCell(0, pages[parentPageNumber]->getInternalKey(ind-1));
+            pages[pageNumber]->insertInternalCell(0, pages[leftSiblingPageNumber]->getInternalPointer(Llen-1));
+            pages[pages[leftSiblingPageNumber]->getInternalPointer(Llen-1)]->setParent(pageNumber);
+            --Llen;
+            pages[leftSiblingPageNumber]->setNumRows(Llen);
+            pages[parentPageNumber]->setInternalKey(ind-1, pages[leftSiblingPageNumber]->getInternalKey(Llen-1));
+            --Llen;
+            pages[leftSiblingPageNumber]->setNumRows(Llen);
+        }
+        else if(rightSiblingPageNumber != -1 && pages[rightSiblingPageNumber]->keySize() > MIN_INTERNAL_KEYS) {
+            pages[pageNumber]->insertInternalCell(len, pages[parentPageNumber]->getInternalKey(ind+1));
+            pages[pageNumber]->insertInternalCell(len, pages[rightSiblingPageNumber]->getInternalPointer(0));
+            pages[pages[rightSiblingPageNumber]->getInternalPointer(0)]->setParent(pageNumber);
+            pages[rightSiblingPageNumber]->eraseInternalCell(0);
+            pages[parentPageNumber]->setInternalKey(ind+1, pages[rightSiblingPageNumber]->getInternalKey(0)); // Keys have shifted to even positions due to the deletion in the previous line
+            pages[rightSiblingPageNumber]->eraseInternalCell(0);
+        }
+        else if(leftSiblingPageNumber != -1) {
+            mergeInternalNodes(leftSiblingPageNumber, pageNumber, pages[parentPageNumber]->getInternalKey(ind-1));
+            deleteInternal(parentPageNumber, pages[parentPageNumber]->getInternalKey(ind-1), ind-1);
+        }
+        else if(rightSiblingPageNumber != -1) {
+            mergeInternalNodes(pageNumber, rightSiblingPageNumber, pages[parentPageNumber]->getInternalKey(ind+1));
+            deleteInternal(parentPageNumber, pages[parentPageNumber]->getInternalKey(ind+1), ind+1);
+        }
+    }
+
+    void mergeLeafNodes(int leftPageNumber, int rightPageNumber) {
+        int rightLen = pages[rightPageNumber]->size();
+        int leftLen = pages[leftPageNumber]->size();
+        Row row;
+
+        for(int i=0; i<rightLen; ++i) {
+            row = pages[rightPageNumber]->getLeafRow(i);
+            pages[leftPageNumber]->setLeafRow(row, leftLen);
+            ++leftLen;
+        }
+        pages[leftPageNumber]->setNumRows(leftLen);
+
+        pages[leftPageNumber]->setNext(pages[rightPageNumber]->getNext());
+        // WARNING !! delete the right page here
+    }
+
+    void deleteLeaf(int pageNumber, int key) {
+        PageNode* pgnd = pages[pageNumber];
+        int len = pgnd->size();
+        int data_index;
+        for(data_index = 0; data_index < len; ++data_index) {
+            if(pgnd->getLeafKey(data_index) == key)
+                break;
+        }
+
+        if(data_index == len) {
+            cout << "Error: Key does not exist\n";
+            return;
+        }
+
+        int numOfRowsToMove = len - data_index - 1;
+        for(int ind = data_index+1; ind < len; ++ind) {
+            pgnd->copyLeafRow(ind, ind-1);
+        }
+
+        len -= 1;
+        pgnd->setNumRows(len);
+
+
+        if(pgnd->parent() == -1 || len >= MIN_LEAF_ROWS) {
+            return;
+        }
+
+        int leftSiblingPageNumber = -1, rightSiblingPageNumber = -1, parentPageNumber = pgnd->parent();
+
+        // "ind" is the index of the 'pointer to the current page' in the parent's key-pointer array.
+        // It is used to find the page numbers of the sibling nodes
+        int ind;
+
+        int parentDataSize = pages[parentPageNumber]->size();
+        for(ind = 1; ind < parentDataSize; ind += 2) {
+            if(pages[parentPageNumber]->getInternalKey(ind) >= key)
+                break;
+        }
+        --ind;
+        if(ind-2 >= 0) leftSiblingPageNumber = pages[parentPageNumber]->getInternalPointer(ind - 2);
+        if(ind+2 < parentDataSize) rightSiblingPageNumber = pages[parentPageNumber]->getInternalPointer(ind + 2);
+
+        if(leftSiblingPageNumber != -1 && pages[leftSiblingPageNumber]->size() > MIN_LEAF_ROWS) {
+            int leftS_len = pages[leftSiblingPageNumber]->size();
+            Row row = pages[leftSiblingPageNumber]->getLeafRow(leftS_len);
+
+            // Update the left Sibling
+            --leftS_len;
+            pages[leftSiblingPageNumber]->setNumRows(leftS_len);
+
+            // Update the current node with the borrowed value
+            for(int i=len;i>0;--i) {
+                pgnd->copyLeafRow(i-1, i);
+            }
+            pgnd->setLeafRow(row, 0);
+            ++len;
+            pgnd->setNumRows(len);
+
+            // Update the parent
+            pages[parentPageNumber]->setInternalPointer(ind - 1, pages[leftSiblingPageNumber]->getLeafKey(leftS_len-1));
+
+        }
+        else if(rightSiblingPageNumber != -1 && pages[rightSiblingPageNumber]->size() > MIN_LEAF_ROWS) {
+            int rightS_len = pages[rightSiblingPageNumber]->size();
+            Row row = pages[rightSiblingPageNumber]->getLeafRow(0);
+
+            // Update the parent
+            pages[parentPageNumber]->setInternalPointer(ind + 1, pages[rightSiblingPageNumber]->getLeafKey(0));
+
+            // Update the current node with the borrowed value
+            pgnd->setLeafRow(row, len);
+            ++len;
+            pgnd->setNumRows(len);
+
+            // Update the right Sibling
+            for(int i=0; i<rightS_len-1; ++i) {
+                pages[rightSiblingPageNumber]->copyLeafRow(i+1, i);
+            }
+            --rightS_len;
+            pages[rightSiblingPageNumber]->setNumRows(rightS_len);
+
+        }
+        else if(leftSiblingPageNumber != -1) {
+            mergeLeafNodes(leftSiblingPageNumber, pageNumber);
+            deleteInternal(parentPageNumber, pages[parentPageNumber]->getInternalKey(ind-1), ind-1);
+        }
+        else if(rightSiblingPageNumber != -1) {
+            mergeLeafNodes(pageNumber, rightSiblingPageNumber);
+            deleteInternal(parentPageNumber, pages[parentPageNumber]->getInternalKey(ind+1), ind+1);
+        }
+
+
+    }
+
+    void deleteData(int x) {
+        int pageNumber = findPage(root, x);
+        deleteLeaf(pageNumber, x);
+    }
 };
 
 
@@ -469,53 +692,67 @@ int main(int argc, char* argv[]) {
     string rawInputString;
 
 
-        // for(int i=1;i<=15;++i) {
-        //     string num = to_string(i);
-        //     rawInputString = "insert " + num + " " + num + " " + num;
-        //     vector<string> inputCommand = split(rawInputString, ' ');
-        //     Row row;
-        //     prepareStatement(inputCommand, row);
-        //     executeStatement(table, inputCommand, row);
-        //     cout << " ------ ### --------\n";
-        // }
-        // executeSelect(table);
-    while(true) {
-        cout << "db2 > ";
-        getline(cin, rawInputString);
-        if(rawInputString.empty()) 
-            continue;
+        for(int i=1;i<=15;++i) {
+            string num = to_string(i);
+            rawInputString = "insert " + num + " " + num + " " + num;
+            vector<string> inputCommand = split(rawInputString, ' ');
+            Row row;
+            prepareStatement(inputCommand, row);
+            executeStatement(table, inputCommand, row);
+            cout << " ------ ### --------\n";
+        }
+        executeSelect(table);
+        table->deleteData(10);
+        table->deleteData(11);
+        executeSelect(table);
+        cout << "\n\n";
+        for(int i=16;i<=17;++i) {
+            string num = to_string(i);
+            rawInputString = "insert " + num + " " + num + " " + num;
+            vector<string> inputCommand = split(rawInputString, ' ');
+            Row row;
+            prepareStatement(inputCommand, row);
+            executeStatement(table, inputCommand, row);
+            cout << " ------ ### --------\n";
+        }
+        executeSelect(table);
+    // while(true) {
+    //     cout << "db2 > ";
+    //     getline(cin, rawInputString);
+    //     if(rawInputString.empty()) 
+    //         continue;
 
-        vector<string> inputCommand = split(rawInputString, ' ');
+    //     vector<string> inputCommand = split(rawInputString, ' ');
         
-        if(rawInputString[0] == '.') {
-            switch(doMetaCommand(table, inputCommand)) {
-                case 0:
-                    continue;
-                case 1:
-                    cout << "Error: Unrecognized command \" " << inputCommand[0] << " \"" << "\n";
-                    continue;
-            }
-        }
+    //     if(rawInputString[0] == '.') {
+    //         switch(doMetaCommand(table, inputCommand)) {
+    //             case 0:
+    //                 continue;
+    //             case 1:
+    //                 cout << "Error: Unrecognized command \" " << inputCommand[0] << " \"" << "\n";
+    //                 continue;
+    //         }
+    //     }
 
 
-        Row row;
-        switch(prepareStatement(inputCommand, row)) {
-            case 0:
-                break;
-            case 1:
-                cout << "Error in Prepare !!";
-                exit(1);
-        }
+    //     Row row;
+    //     switch(prepareStatement(inputCommand, row)) {
+    //         case 0:
+    //             break;
+    //         case 1:
+    //             cout << "Error in Prepare !!";
+    //             exit(1);
+    //     }
 
-        switch(executeStatement(table, inputCommand, row)) {
-            case 0:
-                continue;
-            case 1:
-                cout << "ERROR in execute !!";
-                exit(1);
-        }
+    //     switch(executeStatement(table, inputCommand, row)) {
+    //         case 0:
+    //             continue;
+    //         case 1:
+    //             cout << "ERROR in execute !!";
+    //             exit(1);
+    //     }
 
-    }
+    // }
 
 
 
