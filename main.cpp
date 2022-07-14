@@ -3,8 +3,15 @@
 #include <vector>
 #include <cstring>
 #include <cmath>
+#include <queue>
+#include <utility>
+#include <random>
+#include <chrono>
 
 using namespace std;
+
+mt19937 rng(chrono::steady_clock::now().time_since_epoch().count());
+
 
 #define size_of_attribute(Struct, Attribute) sizeof(((Struct*)0)->Attribute)
 #define MV_VOID(x, y) (((uint8_t*)(x))+(y))
@@ -53,6 +60,31 @@ const uint32_t MAX_INTERNAL_ROWS = BODY_SIZE / INTERNAL_CELL_SIZE - 2 - ((BODY_S
 const uint32_t MAX_INTERNAL_KEYS = MAX_INTERNAL_ROWS / 2;
 const uint32_t MIN_INTERNAL_KEYS = ceil((double)MAX_INTERNAL_KEYS / 2);
 const uint32_t MIN_INTERNAL_ROWS = 2 * (MIN_INTERNAL_KEYS) + 1;
+
+void printConstants() {
+    cout << "\n";
+    cout << "IS_LEAF_OFFSET = " << IS_LEAF_OFFSET << "\n";
+    cout << "IS_LEAF_SIZE = " << IS_LEAF_SIZE << "\n";
+    cout << "PARENT_NUM_OFFSET = " << PARENT_NUM_OFFSET << "\n";
+    cout << "PARENT_NUM_SIZE = " << PARENT_NUM_SIZE << "\n";
+    cout << "NEXT_NODE_OFFSET = " << NEXT_NODE_OFFSET << "\n";
+    cout << "NEXT_NODE_SIZE = " << NEXT_NODE_SIZE << "\n";
+    cout << "NUM_CELL_OFFSET = " << NUM_CELL_OFFSET << "\n";
+    cout << "NUM_CELL_SIZE = " << NUM_CELL_SIZE << "\n";
+    cout << "HEADER_SIZE = " << HEADER_SIZE << "\n";
+    cout << "BODY_OFFSET = " << BODY_OFFSET << "\n";
+    cout << "BODY_SIZE = " << BODY_SIZE << "\n";
+    cout << "INTERNAL_CELL_SIZE = " << INTERNAL_CELL_SIZE << "\n";
+    cout << "ROW_SIZE = " << ROW_SIZE << "\n";
+    cout << "MAX_LEAF_ROWS = " << MAX_LEAF_ROWS << "\n";
+    cout << "MIN_LEAF_ROWS = " << MIN_LEAF_ROWS << "\n";
+    cout << "MAX_INTERNAL_ROWS = " << MAX_INTERNAL_ROWS << "\n";
+    cout << "MAX_INTERNAL_KEYS = " << MAX_INTERNAL_KEYS << "\n";
+    cout << "MIN_INTERNAL_KEYS = " << MIN_INTERNAL_KEYS << "\n";
+    cout << "MIN_INTERNAL_ROWS = " << MIN_INTERNAL_ROWS << "\n";
+    // cout << " = " <<  << "\n";
+    cout << "\n";
+}
 
 class PageNode {
 public:
@@ -240,32 +272,54 @@ public:
     }
 
     // Debug
-    void printInternalNode(int index) {
-        cout << index << " --> ";
+    void printInternalNode(int index, queue<pair<int64_t, int64_t>> &Q, int dis) {
+        cout << index << "-->";
+        auto pg = pages[index];
         int len = pages[index]->size();
-        for(int i = 1; i < len; i += 2) {
-            int64_t val;
-            memcpy(&val, MV_VOID(pages[index]->page, i * sizeof(int64_t) + BODY_OFFSET), sizeof(int64_t));
-            cout << val << ",";
+        
+        for(int i=1;i<len;i+=2) {
+            cout << pg->getInternalKey(i) << ",";
         }
-        cout << "\n";
+
+        for(int i=0;i<len;i+=2) {
+            Q.push({dis+1, pg->getInternalPointer(i)});
+        }
+
+        cout << " : ";
     }
     void printLeafNode(int index) {
-        cout << index << " <--> ";
+        cout << index << "<-->";
         int len = pages[index]->size();
         for(int i = 0; i < len; ++i) {
             int64_t val = pages[index]->getLeafKey(i);
             cout << val << ",";
         }
-        cout << "\n";
+        cout << " : ";
     }
-    void printAll() {
-        int index = findPage(root, -2e8);
-        while(index >= 0) {
-            loadPage(index);
-            printLeafNode(index);
-            index = pages[index]->getNext();
+    void printTable() {
+        queue<pair<int64_t, int64_t>> Q;
+        Q.push({0,root});
+        int prev = 0;
+
+        while(Q.size()) {
+            auto [dis, cur] = Q.front();
+            Q.pop();
+
+            loadPage(cur);
+
+            if(dis != prev) {
+                cout << "\n";
+            }
+
+            if(pages[cur]->isLeaf()) {
+                printLeafNode(cur);
+            }
+            else {
+                printInternalNode(cur, Q, dis);
+            }
+            prev = dis;
         }
+        cout << "\n\n";
     }
 
     // Insert
@@ -321,7 +375,6 @@ public:
         pg->setInternalKey(i, key);
         pg->setInternalPointer(i+1, right);
         pg->setNumRows(pg->size() + 2);
-        printInternalNode(pageNumber);
 
         sz = pg->size();
         if(sz > MAX_INTERNAL_ROWS) {
@@ -348,7 +401,6 @@ public:
         return rightHalfIndex;
     }
     void insertIntoLeaf(int pageNumber, Row& row) {
-        printLeafNode(pageNumber);
         int len = pages[pageNumber]->size();
         PageNode* pg = pages[pageNumber];
         int pos;
@@ -373,8 +425,9 @@ public:
         }
     }
 
-    void insert(Row& row) {
-        int pageNumber = findPage(root, row.id);
+    void insert(int x) {
+        int pageNumber = findPage(root, x);
+        Row row; row.id = x;
         insertIntoLeaf(pageNumber, row);
     }
 
@@ -417,8 +470,7 @@ public:
             pages[root]->setParent(-1);
             return;
         }
-
-        if(pages[pageNumber]->parent() == -1 || (len - 2) / 2 >= MIN_INTERNAL_KEYS) {
+        if(pages[pageNumber]->parent() == -1 || len / 2 >= MIN_INTERNAL_KEYS) {
             return;
         }
 
@@ -447,6 +499,7 @@ public:
         }
         else if(rightSiblingPageNumber != -1 && pages[rightSiblingPageNumber]->keySize() > MIN_INTERNAL_KEYS) {
             pages[pageNumber]->insertInternalCell(len, pages[parentPageNumber]->getInternalKey(ind+1));
+            ++len;
             pages[pageNumber]->insertInternalCell(len, pages[rightSiblingPageNumber]->getInternalPointer(0));
             pages[pages[rightSiblingPageNumber]->getInternalPointer(0)]->setParent(pageNumber);
             pages[rightSiblingPageNumber]->eraseInternalCell(0);
@@ -523,7 +576,7 @@ public:
 
         if(leftSiblingPageNumber != -1 && pages[leftSiblingPageNumber]->size() > MIN_LEAF_ROWS) {
             int leftS_len = pages[leftSiblingPageNumber]->size();
-            Row row = pages[leftSiblingPageNumber]->getLeafRow(leftS_len);
+            Row row = pages[leftSiblingPageNumber]->getLeafRow(leftS_len - 1);
 
             // Update the left Sibling
             --leftS_len;
@@ -643,12 +696,11 @@ int prepareStatement(vector<string> &inputCommand, Row& row) {
 }
 
 int executeSelect(Table* table) {
-    table->printAll();
     return 0;
 }
 
 int executeInsert(Table* table, Row& row) {
-    table->insert(row);
+    // table->insert(row);
     return 0;
 }
 
@@ -686,36 +738,41 @@ int main(int argc, char* argv[]) {
 
     Table* table = table_open(filename);
 
-    printf("MAX_LEAF_ROWS: %d\n", MAX_LEAF_ROWS);
-    printf("maxinternalrows: %d\n", MAX_INTERNAL_ROWS);
+    printConstants();
 
     string rawInputString;
 
 
-        for(int i=1;i<=15;++i) {
-            string num = to_string(i);
-            rawInputString = "insert " + num + " " + num + " " + num;
-            vector<string> inputCommand = split(rawInputString, ' ');
-            Row row;
-            prepareStatement(inputCommand, row);
-            executeStatement(table, inputCommand, row);
-            cout << " ------ ### --------\n";
-        }
-        executeSelect(table);
-        table->deleteData(10);
-        table->deleteData(11);
-        executeSelect(table);
-        cout << "\n\n";
-        for(int i=16;i<=17;++i) {
-            string num = to_string(i);
-            rawInputString = "insert " + num + " " + num + " " + num;
-            vector<string> inputCommand = split(rawInputString, ' ');
-            Row row;
-            prepareStatement(inputCommand, row);
-            executeStatement(table, inputCommand, row);
-            cout << " ------ ### --------\n";
-        }
-        executeSelect(table);
+    vector<int> v;
+    for(int i=0;i<54;++i) {
+        v.push_back(i);
+    }
+    vector<int> tmp = v;
+
+    
+    while(tmp.size()) {
+        int m = tmp.size();
+        int val = rng() % m;
+        cout << "INSERT: " << tmp[val] << "\n";
+        table->insert(tmp[val]);
+        tmp.erase(tmp.begin() + val);
+        table->printTable();
+    }
+
+    tmp = v;
+
+    cout << "\n\n\n";
+
+    while(tmp.size()) {
+        int m = tmp.size();
+        int val = rng() % m;
+        cout << "DELETE: " << tmp[val] << "\n";
+        table->deleteData(tmp[val]);
+        tmp.erase(tmp.begin() + val);
+        table->printTable();
+    }
+
+
     // while(true) {
     //     cout << "db2 > ";
     //     getline(cin, rawInputString);
