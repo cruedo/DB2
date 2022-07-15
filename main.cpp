@@ -17,7 +17,7 @@ mt19937 rng(chrono::steady_clock::now().time_since_epoch().count());
 #define MV_VOID(x, y) (((uint8_t*)(x))+(y))
 
 
-const uint32_t PAGE_SIZE = 70;
+const uint32_t PAGE_SIZE = 100;
 const uint32_t MAX_PAGES = 100;
 const uint32_t MAX_TABLES = 100;
 
@@ -58,7 +58,7 @@ const uint32_t MAX_LEAF_ROWS = BODY_SIZE / ROW_SIZE - 1;
 const uint32_t MIN_LEAF_ROWS = ceil((double)MAX_LEAF_ROWS / 2);
 const uint32_t MAX_INTERNAL_ROWS = BODY_SIZE / INTERNAL_CELL_SIZE - 2 - ((BODY_SIZE / INTERNAL_CELL_SIZE) % 2 == 0);
 const uint32_t MAX_INTERNAL_KEYS = MAX_INTERNAL_ROWS / 2;
-const uint32_t MIN_INTERNAL_KEYS = ceil((double)MAX_INTERNAL_KEYS / 2);
+const uint32_t MIN_INTERNAL_KEYS = MAX_INTERNAL_KEYS / 2;
 const uint32_t MIN_INTERNAL_ROWS = 2 * (MIN_INTERNAL_KEYS) + 1;
 
 void printConstants() {
