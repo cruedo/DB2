@@ -17,8 +17,8 @@ mt19937 rng(chrono::steady_clock::now().time_since_epoch().count());
 #define MV_VOID(x, y) (((uint8_t*)(x))+(y))
 
 
-const uint32_t PAGE_SIZE = 100;
-const uint32_t MAX_PAGES = 100;
+const uint32_t PAGE_SIZE = 4096;
+const uint32_t MAX_PAGES = 1000;
 const uint32_t MAX_TABLES = 100;
 
 
@@ -30,13 +30,16 @@ const int32_t NEXT_NODE_OFFSET = PARENT_NUM_OFFSET + PARENT_NUM_SIZE;
 const int32_t NEXT_NODE_SIZE = sizeof(int32_t);
 const uint32_t NUM_CELL_OFFSET = NEXT_NODE_OFFSET + NEXT_NODE_SIZE;
 const uint32_t NUM_CELL_SIZE = sizeof(uint32_t);
+
 const uint32_t HEADER_SIZE = NUM_CELL_SIZE + NUM_CELL_OFFSET;
+
 const uint32_t BODY_OFFSET = HEADER_SIZE;
 const uint32_t BODY_SIZE = PAGE_SIZE - HEADER_SIZE;
 
 const uint32_t TABLE_NUM = 0;
 const uint32_t INTERNAL_CELL_SIZE = sizeof(uint64_t);
 
+const uint32_t LEN = 255;
 
 void print(void* ptr, int sz) {
     for(int i=0;i<sz;++i) {
@@ -49,8 +52,8 @@ void print(void* ptr, int sz) {
 class Row {
 public:
     int64_t id;
-    // char name[1];
-    // char email[1];
+    char name[LEN];
+    char email[LEN];
 };
 
 const uint32_t ROW_SIZE = sizeof(Row);
@@ -100,6 +103,10 @@ public:
 
     PageNode() {
         page = operator new(PAGE_SIZE);
+        setNumRows(0);
+        setParent(-1);
+        setIsLeaf(0);
+        setNext(-1);
     }
 
     void setIsLeaf(uint8_t status) {
@@ -192,6 +199,13 @@ public:
         setNext(-1);
         setIsLeaf(1);
     }
+
+    void pageDetail() {
+        cout << "IS_LEAF ? " << (int)isLeaf() << "\n";
+        cout << "PARENT ID : " << parent() << "\n";
+        cout << "ARRAY SIZE : " << size() << "\n";
+    }
+
 };
 
 
@@ -205,11 +219,36 @@ public:
     string filename;
     int32_t page_count;
 
+    Table(char* fn) {
+        filename = string(fn);
+        fd.open(filename, ios::out | ios::in );
+
+        pages.resize(MAX_PAGES, nullptr);
+
+        fd.seekg(0, ios_base::end);
+
+        int fileSize = fd.tellg();
+        page_count = ceil((double)fileSize / PAGE_SIZE);
+
+        cout << "The total pages are : " << page_count << "\n";
+        root = findRoot(0); // findRoot() depends on page_count. so it should be called after initializing page_count
+        cout << "The root is initialized to : " << root << "\n";
+    }
+
 
     int findEmptyPage() {
         int res = page_count;
+        if(res >= MAX_PAGES) {
+            cout << "Error : empty page is out of bounds !!\n";
+            exit(1);
+        }
         ++page_count;
         pages[res] = new PageNode();
+
+        // cout << "\n------ Page Number " << res << " --------\n";
+        // pages[res]->pageDetail();
+        // cout << "== end\n\n";
+        
         return res;
     }
     void loadPage(int index) {
@@ -217,7 +256,7 @@ public:
         fd.seekg(0, ios_base::end);
         int fileSize = fd.tellg();
         if(fileSize < 0) {
-            cout << "tellp is -1 !\n";
+            cout << "tellg is -1 !\n";
             exit(1);
         }
 
@@ -228,11 +267,9 @@ public:
         
         if(pages[index] == nullptr) {
             pages[index] = new PageNode();
-            int totalPages = page_count;
-
             
             // If the page with the given number exists within the file then just read it from the file.
-            if(index < totalPages) {
+            if(index < page_count) {
                 fd.seekg(index * PAGE_SIZE);
                 fd.read((char*)(pages[index]->page), PAGE_SIZE);
             }
@@ -321,7 +358,20 @@ public:
         }
         cout << "\n\n";
     }
-
+    void printAllRows() {
+        int64_t cur = root;
+        while(!pages[cur]->isLeaf()) {
+            cur = pages[cur]->getInternalPointer(0);
+        }
+        while(cur >= 0) {
+            int len = pages[cur]->size();
+            for(int i=0;i<len;++i) {
+                Row row = pages[cur]->getLeafRow(i);
+                cout << "( " << row.id << ", " << row.name << ", " << row.email << " )\n";
+            }
+            cur = pages[cur]->getNext();
+        }
+    }
     // Insert
     int64_t splitInternalNode(int pageNumber, int index) {
         PageNode* pg = pages[pageNumber];
@@ -425,9 +475,8 @@ public:
         }
     }
 
-    void insert(int x) {
-        int pageNumber = findPage(root, x);
-        Row row; row.id = x;
+    void insert(Row &row) {
+        int pageNumber = findPage(root, row.id);
         insertIntoLeaf(pageNumber, row);
     }
 
@@ -449,10 +498,10 @@ public:
         }
         LPG->setNumRows(Llen);
 
-        // WARNING !! Delete the right node here.
+        // WARNING !! De-allocate the right node here.
     }
 
-    // REVIEW REQUIRED !!
+    // REVIEW REQUIRED !! (De allocation)
     void deleteInternal(int pageNumber, int key, int index) {
         PageNode* pgnd = pages[pageNumber];
         int len = pgnd->size();
@@ -546,7 +595,6 @@ public:
             return;
         }
 
-        int numOfRowsToMove = len - data_index - 1;
         for(int ind = data_index+1; ind < len; ++ind) {
             pgnd->copyLeafRow(ind, ind-1);
         }
@@ -630,6 +678,21 @@ public:
         int pageNumber = findPage(root, x);
         deleteLeaf(pageNumber, x);
     }
+
+    int close() {
+        for(int i = 0; i < MAX_PAGES ; ++i) {
+            auto &p = pages[i];
+            if(p == nullptr) continue;
+
+            fd.seekp(i * PAGE_SIZE);
+            fd.write((char*)(p->page), PAGE_SIZE);
+            operator delete(p->page);
+            delete p;
+            cout << "Page " << i << "\n";
+        }
+        fd.close();
+        return 0;
+    }
 };
 
 
@@ -638,44 +701,9 @@ public:
 
 
 
-
-Table* table_open(char* filename) {
-    Table* table = new Table;
-    table->root = 0;
-    table->filename = string(filename);
-    (table->fd).open(table->filename, ios::out | ios::in );
-    table->pages.resize(PAGE_SIZE);
-    for(auto &p: table->pages) {
-        p = nullptr;
-    }
-    (table->fd).seekg(0, ios_base::end);
-    int fileSize = (table->fd).tellg();
-    table->page_count = ceil((double)fileSize / PAGE_SIZE);
-    cout << "The total pages are : " << table->page_count << "\n";
-    table->root = table->findRoot(0);
-    cout << "The root is initialized to : " << table->root << "\n";
-
-    return table;
-}
-
-int table_close(Table* table) {
-    for(int i = 0; i < PAGE_SIZE ; ++i) {
-        auto &p = table->pages[i];
-        if(p == nullptr) continue;
-        if(p->isLeaf()) {
-            table->printLeafNode(i);
-            // print(p->page, 40);
-        }
-        table->fd.seekp(i * PAGE_SIZE);
-        table->fd.write((char*)(p->page), PAGE_SIZE);
-    }
-    table->fd.close();
-    return 0;
-}
-
 int doMetaCommand(Table* table, vector<string> &inputCommand) {
     if(inputCommand[0] == ".exit") {
-        table_close(table);
+        table->close();
         exit(0);
     }
     return 1;
@@ -729,6 +757,18 @@ vector<string> split(string& input, char delimitter) {
     return output;
 }
 
+Row numToRow(int x) {
+    string number = to_string(x);
+    string name = "name" + number;
+    string email = "email" + number;
+    Row row;
+    row.id = x;
+    strcpy(row.name, name.c_str());
+    strcpy(row.email, email.c_str());
+    return row;
+}
+
+
 int main(int argc, char* argv[]) {
     if(argc < 2) {
         cout << "Error: Database file not provided !\n";
@@ -736,15 +776,14 @@ int main(int argc, char* argv[]) {
     }
     char* filename = argv[1];
 
-    Table* table = table_open(filename);
+    Table* table = new Table(filename);
 
     printConstants();
 
-    string rawInputString;
 
 
     vector<int> v;
-    for(int i=0;i<54;++i) {
+    for(int i=0;i<400;++i) {
         v.push_back(i);
     }
     vector<int> tmp = v;
@@ -753,26 +792,34 @@ int main(int argc, char* argv[]) {
     while(tmp.size()) {
         int m = tmp.size();
         int val = rng() % m;
-        cout << "INSERT: " << tmp[val] << "\n";
-        table->insert(tmp[val]);
+        // cout << "INSERT: " << tmp[val] << "\n";
+        Row row = numToRow(tmp[val]);
+        table->insert(row);
         tmp.erase(tmp.begin() + val);
-        table->printTable();
+        // table->printTable();
     }
+
+    cout << "\n\n";
+    table->printAllRows();
 
     tmp = v;
 
     cout << "\n\n\n";
 
-    while(tmp.size()) {
-        int m = tmp.size();
-        int val = rng() % m;
-        cout << "DELETE: " << tmp[val] << "\n";
-        table->deleteData(tmp[val]);
-        tmp.erase(tmp.begin() + val);
-        table->printTable();
-    }
+    // while(tmp.size()) {
+    //     int m = tmp.size();
+    //     int val = rng() % m;
+    //     // cout << "DELETE: " << tmp[val] << "\n";
+    //     table->deleteData(tmp[val]);
+    //     tmp.erase(tmp.begin() + val);
+    //     // table->printTable();
+    // }
 
+    table->close();
+    delete table;
+    table = nullptr;
 
+    // string rawInputString;
     // while(true) {
     //     cout << "db2 > ";
     //     getline(cin, rawInputString);
